@@ -167,6 +167,8 @@ namespace catapult { namespace observers {
 					for (itTotal = catapult::plugins::totalSupply.rbegin(); itTotal != catapult::plugins::totalSupply.rend(); ++itTotal) {         
 						if (std::get<0>(*itTotal) == context.Height.unwrap()) {
 							totalSupply = std::get<1>(*itTotal);
+							inflation = std::get<2>(*itTotal);
+							totalSupply -= inflation;
 							break;
 						}
 						if (context.Height.unwrap() > std::get<0>(*itTotal)) {
