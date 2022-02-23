@@ -84,10 +84,10 @@ namespace catapult { namespace observers {
 			
 			if (catapult::plugins::totalSupply.size() == 0) {
 				// if there are no records, load them from the files
-				catapult::plugins::loadEpochFeeFromFile();
-				catapult::plugins::loadPricesFromFile();
-				catapult::plugins::loadTotalSupplyFromFile();
 				catapult::plugins::readConfig();
+				catapult::plugins::loadEpochFeeFromFile(context.Height.unwrap());
+				catapult::plugins::loadPricesFromFile(context.Height.unwrap());
+				catapult::plugins::loadTotalSupplyFromFile(context.Height.unwrap());
 				catapult::plugins::totalSupply.push_front({1, catapult::plugins::initialSupply, 
 					catapult::plugins::initialSupply});
 			}
@@ -122,7 +122,7 @@ namespace catapult { namespace observers {
 				catapult::plugins::addEpochFeeEntry(context.Height.unwrap(), collectedEpochFees, feeToPay, model::AddressToString(notification.Beneficiary));
 				if (catapult::plugins::totalSupply.size() > 0) {
 					for (itTotal = catapult::plugins::totalSupply.rbegin(); itTotal != catapult::plugins::totalSupply.rend(); ++itTotal) {
-						if (context.Height.unwrap() >= std::get<0>(*itTotal)) {
+						if (context.Height.unwrap() > std::get<0>(*itTotal)) {
 							totalSupply = std::get<1>(*itTotal);
 							break;
 						}
@@ -197,6 +197,12 @@ namespace catapult { namespace observers {
 					? Amount(totalAmount.unwrap() * options.HarvestBeneficiaryPercentage / 100)
 					: Amount();
 			auto harvesterAmount = totalAmount - networkAmount - beneficiaryAmount;
+
+			CATAPULT_LOG(error) << "Commit: " << (NotifyMode::Commit == context.Mode);
+			CATAPULT_LOG(error) << "Beneficiary: " << notification.Beneficiary;
+			CATAPULT_LOG(error) << "Amount: " << beneficiaryAmount;
+			CATAPULT_LOG(error) << "Harvester: " << notification.Harvester;
+			CATAPULT_LOG(error) << "Amount: " << harvesterAmount;
 
 			// always create receipt for harvester
 			FeeApplier applier(options.CurrencyMosaicId, context);

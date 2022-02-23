@@ -3,6 +3,8 @@
 #include "stdint.h"
 #include "catapult/types.h"
 #include <string>
+#include "src/catapult/cache_db/RocksDatabase.h"
+#include "src/catapult/cache_db/RocksInclude.h"
 
 #ifdef __APPLE__
 #define NODESTROY [[clang::no_destroy]]
@@ -46,8 +48,6 @@ namespace catapult {
         // max number of coins
         extern uint64_t generationCeiling;
 
-
-
         //region block_reward
         void configToFile();
         void readConfig();
@@ -69,7 +69,7 @@ namespace catapult {
         void addPriceEntryToFile(uint64_t blockHeight, uint64_t lowPrice, uint64_t highPrice, double multiplier);        
         void updatePricesFile();
         std::string pricesToString();
-        void loadPricesFromFile();
+        void loadPricesFromFile(uint64_t blockHeight);
         void processPriceTransaction(uint64_t blockHeight, uint64_t lowPrice, uint64_t highPrice, bool rollback = false);
 
         //endregion price_helper
@@ -82,7 +82,7 @@ namespace catapult {
         void addTotalSupplyEntryToFile(uint64_t blockHeight, uint64_t supplyAmount, uint64_t increase);
         void updateTotalSupplyFile();
         std::string totalSupplyToString();
-        void loadTotalSupplyFromFile();
+        void loadTotalSupplyFromFile(uint64_t blockHeight);
         
         //endregion total_supply_helper
 
@@ -94,7 +94,7 @@ namespace catapult {
         void addEpochFeeEntryToFile(uint64_t blockHeight, uint64_t supplyAmount, uint64_t blockFee, std::string address);
         void updateEpochFeeFile();
         std::string epochFeeToString();
-        void loadEpochFeeFromFile();
+        void loadEpochFeeFromFile(uint64_t blockHeight);
         
         //endregion epoch_fees_helper
 	}

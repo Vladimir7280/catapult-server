@@ -21,17 +21,6 @@
 typedef int errno_t;
 #endif
 
-#if defined(__USE_GNU) || defined(__APPLE__)
-static errno_t fopen_s(FILE **f, const char *name, const char *mode) {
-    errno_t ret = 0;
-    assert(f);
-    *f = fopen(name, mode);
-    if (!*f)
-        ret = errno;
-    return ret;
-}
-#endif
-
 static bool areSame(double a, double b) {
     return std::fabs(a - b) < std::numeric_limits<double>::epsilon();
 }
@@ -330,12 +319,10 @@ namespace catapult { namespace plugins {
     void removeOldPrices(uint64_t blockHeight) {
         if (blockHeight < 345600u + entryLifetime) // no old blocks (store some additional blocks in case of a rollback)
             return;
-        bool updated = false;
         std::deque<std::tuple<uint64_t, uint64_t, uint64_t, double>>::iterator it;
         for (it = priceList.begin(); it != priceList.end(); ++it) {
             if (std::get<0>(*it) < blockHeight - 345599u - entryLifetime) { // older than 120 days + some entryLifetime blocks
                 priceList.erase(it);
-                updated = true;
             }
             else
                 return;
@@ -343,13 +330,10 @@ namespace catapult { namespace plugins {
                 break;
             }
         }
-        if (updated)
-            updatePricesFile();
     }
 
     bool addPrice(uint64_t blockHeight, uint64_t lowPrice, uint64_t highPrice, double multiplier, bool addToFile) {
         removeOldPrices(blockHeight);
-
         // must be non-zero
         if (!lowPrice || !highPrice) {
             if (!lowPrice)
@@ -393,6 +377,11 @@ namespace catapult { namespace plugins {
     }
 
     void removePrice(uint64_t blockHeight, uint64_t lowPrice, uint64_t highPrice, double multiplier) {
+        const std::string priceDirectory = "./data/price";
+        std::vector<std::string> priceFields {"default"};
+        cache::RocksDatabaseSettings priceSettings(priceDirectory, priceFields, cache::FilterPruningMode::Disabled);
+        cache::RocksDatabase priceDB(priceSettings);
+
         std::deque<std::tuple<uint64_t, uint64_t, uint64_t, double>>::reverse_iterator it;
         for (it = priceList.rbegin(); it != priceList.rend(); ++it) {
             if (blockHeight > std::get<0>(*it))
@@ -407,47 +396,26 @@ namespace catapult { namespace plugins {
                 break;
             }
         }
-        updatePricesFile(); // update data in the file
+        priceDB.del(0, rocksdb::Slice(std::to_string(blockHeight)));
+        priceDB.flush();
+        updatePricesFile();
     }
 
     void addPriceEntryToFile(uint64_t blockHeight, uint64_t lowPrice, uint64_t highPrice, double multiplier) {
-        long size = 0;
-        FILE *file;
-        errno_t err = fopen_s(&file, "./data/prices.txt", "r+");
-        if (err != 0) {
-            err = fopen_s(&file, "./data/prices.txt", "w+");
-            if (err != 0) {
-                CATAPULT_LOG(error) << "Error: Can't open nor create the ./data/prices.txt file\n";
-                return;
-            }
-        } else {
-            fseek(file, 0, SEEK_END);
-            size = ftell(file);
-            if (size == -1) {
-                CATAPULT_LOG(error) << "Error: problem with fseek in ./data/prices.txt file\n";
-                fclose(file);
-                return;
-            }
-        }
-        if (size % 50 > 0) {
-            CATAPULT_LOG(error) << "Fatal error: ./data/prices.txt file is corrupt/invalid\n";
-            return;
-        }
         
-        std::string priceData[PRICE_DATA_SIZE] = {
-            std::to_string(blockHeight),
+        const std::string priceDirectory = "./data/price";
+        std::vector<std::string> priceFields {"default"};
+        cache::RocksDatabaseSettings priceSettings(priceDirectory, priceFields, cache::FilterPruningMode::Disabled);
+        cache::RocksDatabase priceDB(priceSettings);
+
+        std::string priceData[PRICE_DATA_SIZE - 1] = {
             std::to_string(lowPrice),
             std::to_string(highPrice),
             std::to_string(multiplier)
-        };
-        
-        for (int i = 0; i < PRICE_DATA_SIZE; ++i) {
-            // add spaces to string as padding
-            /** 
-             * wowazzz: One variable `size` is used for 2 meaning?..weird
-             */
+        };        
+        for (int i = 0; i < PRICE_DATA_SIZE - 1; ++i) {
             std::size_t priceSize = priceData[i].length();
-            if (i > 0 && i < PRICE_DATA_SIZE - 1) {
+            if (i < PRICE_DATA_SIZE - 2) {
                 for (std::size_t j = 0; j < 15 - priceSize; ++j) {
                     priceData[i] += ' ';
                 }
@@ -456,16 +424,16 @@ namespace catapult { namespace plugins {
                     priceData[i] += ' ';
                 }
             }
-            fputs(priceData[i].c_str(), file);
         }
-        fclose(file);
+        for (int i = 1; i < PRICE_DATA_SIZE - 1; ++i) {
+            priceData[0] += priceData[i];
+        }
+
+        priceDB.put(0, rocksdb::Slice(std::to_string(blockHeight)), priceData[0]);
+        priceDB.flush();
     }
 
     void updatePricesFile() {
-        FILE *file;
-        errno_t err = fopen_s(&file, "./data/prices.txt", "w"); // erase and rewrite the prices
-        if (err == 0)
-            fclose(file);
         std::deque<std::tuple<uint64_t, uint64_t, uint64_t, double>>::iterator it;
         for (it = priceList.begin(); it != priceList.end(); ++it) {
             addPriceEntryToFile(std::get<0>(*it), std::get<1>(*it), std::get<2>(*it), std::get<3>(*it));
@@ -498,60 +466,33 @@ namespace catapult { namespace plugins {
         return list;
     }
 
-    void loadPricesFromFile() {
-        long size;
-        double multiplier;
-        bool errors = false;
-        std::string blockHeight = "", lowPrice = "", highPrice = "", multiplierStr = "";
-        priceList.clear();
-        FILE *file;
-        errno_t err = fopen_s(&file, "./data/prices.txt", "r+");
-        if (err != 0) {
-            CATAPULT_LOG(warning) << "Warning: ./data/prices.txt does not exist\n";
-            return;
+    void loadPricesFromFile(uint64_t blockHeight) {
+        const std::string priceDirectory = "./data/price";
+        std::vector<std::string> priceFields {"default"};
+        cache::RocksDatabaseSettings priceSettings(priceDirectory, priceFields, cache::FilterPruningMode::Disabled);
+        cache::RocksDatabase priceDB(priceSettings);
+        cache::RdbDataIterator result;
+        std::string values[PRICE_DATA_SIZE - 1];
+        uint64_t key = blockHeight - 345599u - entryLifetime;
+        if (key > blockHeight) {
+            key = 0;
         }
-        fseek(file, 0, SEEK_END);
-        size = ftell(file);
-        if (size == -1) {
-            CATAPULT_LOG(error) << "Error: problem with fseek in ./data/prices.txt file\n";
-            fclose(file);
-            return;
-        } else if (size % 100 > 0) {
-            CATAPULT_LOG(error) << "Error: ./data/prices.txt content is invalid\n";
-            fclose(file);
-            return;
-        }
-        fseek(file, 0, SEEK_SET);
-        while (ftell(file) < size) {
-            blockHeight = "";
-            lowPrice = "";
-            highPrice = "";
-            multiplierStr = "";
-            for (int i = 0; i < 10 && !feof(file); ++i) {
-                blockHeight += static_cast<char>(getc(file));
-            } for (int i = 0; i < 15 && !feof(file); ++i) {
-                lowPrice += static_cast<char>(getc(file));
-            } for (int i = 0; i < 15 && !feof(file); ++i) {
-                highPrice += static_cast<char>(getc(file));
-            } for (int i = 0; i < 10 && !feof(file); ++i) {
-                multiplierStr += static_cast<char>(getc(file));
+        while (key < blockHeight) {
+            priceDB.get(0, rocksdb::Slice(std::to_string(key)), result);
+            if (result.storage().empty()) {
+                key++;
+                continue;
             }
+            values[0] = result.storage().ToString();
+            values[1] = values[0].substr(15, 15);
+            values[2] = values[0].substr(30, 10);
+            values[0] = values[0].substr(0, 15);
 
-            errors = !addPrice(std::stoul(blockHeight), std::stoul(lowPrice), std::stoul(highPrice), std::stod(multiplierStr),
+            addPrice(key, std::stoul(values[0]), std::stoul(values[1]), std::stod(values[2]),
                 false);
-            currentMultiplier = 0;
-            multiplier = getCoinGenerationMultiplier(std::stoul(blockHeight));
-            if ( !areSame(multiplier, stod(multiplierStr)) ) {
-                CATAPULT_LOG(error) << "Error: actual multiplier (" << multiplier << ") doesn't match the multiplier"
-                    << " specified in the file (" << multiplierStr << ")\n";
-                errors = true;
-            }
-            if (errors) {
-                CATAPULT_LOG(error) << "Fatal error: ./data/prices.txt file is corrupt/invalid\n";
-                break;
-            }
+            result.storage().clear();
+            key++;
         }
-        fclose(file);
     }
 
     //endregion price_helper
@@ -561,12 +502,10 @@ namespace catapult { namespace plugins {
     void removeOldTotalSupplyEntries(uint64_t blockHeight) {
         if (blockHeight < entryLifetime)
             return;
-        bool updated = false;
         std::deque<std::tuple<uint64_t, uint64_t, uint64_t>>::iterator it;
         for (it = totalSupply.begin(); it != totalSupply.end(); ++it) {
             if (std::get<0>(*it) < blockHeight - entryLifetime + 1) { // older than entryLifetime blocks
                 totalSupply.erase(it);
-                updated = true;
             }
             else
                 return; // Entries are ordered, so no need to look further
@@ -574,8 +513,6 @@ namespace catapult { namespace plugins {
                 break;
             }
         }
-        if (updated)
-            updateTotalSupplyFile();
     }
 
     bool addTotalSupplyEntry(uint64_t blockHeight, uint64_t supplyAmount, uint64_t increase, bool addToFile) {
@@ -625,6 +562,10 @@ namespace catapult { namespace plugins {
     }
 
     void removeTotalSupplyEntry(uint64_t blockHeight, uint64_t supplyAmount, uint64_t increase) {
+        const std::string supplyDirectory = "./data/supply";
+        std::vector<std::string> supplyFields {"default"};
+        cache::RocksDatabaseSettings supplySetting(supplyDirectory, supplyFields, cache::FilterPruningMode::Disabled);
+        cache::RocksDatabase supplyDB(supplySetting);
         std::deque<std::tuple<uint64_t, uint64_t, uint64_t>>::reverse_iterator it;
         for (it = totalSupply.rbegin(); it != totalSupply.rend(); ++it) {
             if (blockHeight > std::get<0>(*it))
@@ -638,64 +579,38 @@ namespace catapult { namespace plugins {
                 break;
             }
         }
+        supplyDB.del(0, rocksdb::Slice(std::to_string(blockHeight)));
+        supplyDB.flush();
         updateTotalSupplyFile(); // update data in the file
     }
 
     void addTotalSupplyEntryToFile(uint64_t blockHeight, uint64_t supplyAmount, uint64_t increase) {
-        long size = 0;
-        FILE *file;
-        errno_t err = fopen_s(&file, "./data/totalSupply.txt", "r+");
-        if (err != 0) {
-            err = fopen_s(&file, "./data/totalSupply.txt", "w+");
-            if (err != 0) {
-                CATAPULT_LOG(error) << "Error: Can't open nor create the ./data/totalSupply.txt file\n";
-                return;
-            }
-        } else {
-            fseek(file, 0, SEEK_END);
-            size = ftell(file);
-            if (size == -1) {
-                CATAPULT_LOG(error) << "Error: problem with fseek in ./data/totalSupply.txt file\n";
-                fclose(file);
-                return;
-            }
-        }
-        if (size % 34 > 0) {
-            CATAPULT_LOG(error) << "Fatal error: ./data/totalSupply.txt file is corrupt/invalid\n";
-            return;
-        }
+        
+        const std::string supplyDirectory = "./data/supply";
+        std::vector<std::string> supplyFields {"default"};
+        cache::RocksDatabaseSettings supplySetting(supplyDirectory, supplyFields, cache::FilterPruningMode::Disabled);
+        cache::RocksDatabase supplyDB(supplySetting);
 
-        std::string supplyData[SUPPLY_DATA_SIZE] = {
-            std::to_string(blockHeight),
+        std::string supplyData[SUPPLY_DATA_SIZE - 1] = {
             std::to_string(supplyAmount),
             std::to_string(increase)
         };
         
-        for (int i = 0; i < SUPPLY_DATA_SIZE; ++i) {
-            // add spaces to string as padding
-            /** 
-             * wowazzz: One variable `size` is used for 2 meaning?..weird
-             */
+        for (int i = 0; i < SUPPLY_DATA_SIZE - 1; ++i) {
             std::size_t supplySize = supplyData[i].length();
-            if (i > 0) {
-                for (std::size_t j = 0; j < 12 - supplySize; ++j) {
-                    supplyData[i] += ' ';
-                }
-            } else {
-                for (std::size_t j = 0; j < 10 - supplySize; ++j) {
-                    supplyData[i] += ' ';
-                }
+            for (std::size_t j = 0; j < 20 - supplySize; ++j) {
+                supplyData[i] += ' ';
             }
-            fputs(supplyData[i].c_str(), file);
         }
-        fclose(file);
+        for (int i = 1; i < SUPPLY_DATA_SIZE - 1; ++i) {
+            supplyData[0] += supplyData[i];
+        }
+
+        supplyDB.put(0, rocksdb::Slice(std::to_string(blockHeight)), supplyData[0]);
+        supplyDB.flush();
     }
 
     void updateTotalSupplyFile() {
-        FILE *file;
-        errno_t err = fopen_s(&file, "./data/totalSupply.txt", "w"); // erase and rewrite the prices
-        if (err == 0)
-            fclose(file);
         std::deque<std::tuple<uint64_t, uint64_t, uint64_t>>::iterator it;
         for (it = totalSupply.begin(); it != totalSupply.end(); ++it) {
             addTotalSupplyEntryToFile(std::get<0>(*it), std::get<1>(*it), std::get<2>(*it));
@@ -713,59 +628,41 @@ namespace catapult { namespace plugins {
                 list += ' ';
             list += std::to_string(std::get<1>(*it));
             length = std::to_string(std::get<1>(*it)).length();
-            for (std::size_t i = 0; i < 12 - length; ++i)
+            for (std::size_t i = 0; i < 20 - length; ++i)
                 list += ' ';
             list += std::to_string(std::get<2>(*it));
             length = std::to_string(std::get<2>(*it)).length();
-            for (std::size_t i = 0; i < 12 - length; ++i)
+            for (std::size_t i = 0; i < 20 - length; ++i)
                 list += ' ';
             list += '\n';
         }
         return list;
     }
 
-    void loadTotalSupplyFromFile() {
-        long size;
-        bool errors = false;
-        std::string blockHeight = "", supply = "", increase = "";
-        totalSupply.clear();
-        FILE *file;
-        errno_t err = fopen_s(&file, "./data/totalSupply.txt", "r+");
-        if (err != 0) {
-            CATAPULT_LOG(warning) << "Warning: ./data/totalSupply.txt does not exist\n";
-            return;
+    void loadTotalSupplyFromFile(uint64_t blockHeight) {
+        const std::string supplyDirectory = "./data/supply";
+        std::vector<std::string> supplyFields {"default"};
+        cache::RocksDatabaseSettings supplySetting(supplyDirectory, supplyFields, cache::FilterPruningMode::Disabled);
+        cache::RocksDatabase supplyDB(supplySetting);
+        cache::RdbDataIterator result;
+        std::string values[SUPPLY_DATA_SIZE - 1];
+        uint64_t key = blockHeight - entryLifetime + 1;
+        if (key > blockHeight) {
+            key = 0;
         }
-        fseek(file, 0, SEEK_END);
-        size = ftell(file);
-        if (size == -1) {
-            CATAPULT_LOG(error) << "Error: problem with fseek in ./data/totalSupply.txt file\n";
-            fclose(file);
-            return;
-        } else if (size % 34 > 0) {
-            CATAPULT_LOG(error) << "Error: ./data/totalSupply.txt content is invalid\n";
-            fclose(file);
-            return;
-        }
-        fseek(file, 0, SEEK_SET);
-        while (ftell(file) < size) {
-            blockHeight = "";
-            supply = "";
-            increase = "";
-            for (int i = 0; i < 10 && !feof(file); ++i) {
-                blockHeight += static_cast<char>(getc(file));
-            } for (int i = 0; i < 12 && !feof(file); ++i) {
-                supply += static_cast<char>(getc(file));
-            } for (int i = 0; i < 12 && !feof(file); ++i) {
-                increase += static_cast<char>(getc(file));
+        while (key < blockHeight) {
+            supplyDB.get(0, rocksdb::Slice(std::to_string(key)), result);
+            if (result.storage().empty()) {
+                key++;
+                continue;
             }
-
-            errors = !addTotalSupplyEntry(std::stoul(blockHeight), std::stoul(supply), std::stoul(increase), false);
-            if (errors) {
-                CATAPULT_LOG(error) << "Fatal error: ./data/totalSupply.txt file is corrupt/invalid\n";
-                break;
-            }
+            values[0] = result.storage().ToString();
+            values[1] = values[0].substr(20, 20);
+            values[0] = values[0].substr(0, 20);
+            addTotalSupplyEntry(key, std::stoul(values[0]), std::stoul(values[1]), false);
+            key++;
+            result.storage().clear();
         }
-        fclose(file);
     }
     
     //endregion total_supply_helper
@@ -775,12 +672,10 @@ namespace catapult { namespace plugins {
     void removeOldEpochFeeEntries(uint64_t blockHeight) {
         if (blockHeight < entryLifetime)
             return;
-        bool updated = false;
         std::deque<std::tuple<uint64_t, uint64_t, uint64_t, std::string>>::iterator it;
         for (it = epochFees.begin(); it != epochFees.end(); ++it) {
             if (std::get<0>(*it) < blockHeight - entryLifetime + 1) { // older than some entryLifetime blocks
                 epochFees.erase(it);
-                updated = true;
             }
             else
                 break; // Entries are ordered, so no need to look further
@@ -788,8 +683,6 @@ namespace catapult { namespace plugins {
                 break;
             }
         }
-        if (updated)
-            updateEpochFeeFile();
     }
 
     bool addEpochFeeEntry(uint64_t blockHeight, uint64_t collectedFees, uint64_t currentFee, std::string address, bool addToFile) {
@@ -831,6 +724,10 @@ namespace catapult { namespace plugins {
     }
 
     void removeEpochFeeEntry(uint64_t blockHeight, uint64_t collectedFees, uint64_t blockFee, std::string address) {
+        const std::string feesDirectory = "./data/fees";
+        std::vector<std::string> feesFields {"default"};
+        cache::RocksDatabaseSettings feesSetting(feesDirectory, feesFields, cache::FilterPruningMode::Disabled);
+        cache::RocksDatabase feesDB(feesSetting);
         std::deque<std::tuple<uint64_t, uint64_t, uint64_t, std::string>>::reverse_iterator it;
         for (it = epochFees.rbegin(); it != epochFees.rend(); ++it) {
             if (blockHeight > std::get<0>(*it))
@@ -843,69 +740,74 @@ namespace catapult { namespace plugins {
                     << ", collectedFees: " << collectedFees << ", feeToPay: " << blockFee << ", address: " << address << "\n";
             }
         }
+        int i = -1, empty = 0;
+        cache::RdbDataIterator result;
+        do {
+            i++;
+            feesDB.get(0, rocksdb::Slice(std::to_string(blockHeight) + "-" + std::to_string(i)), result);
+            if (result.storage().empty()) {
+                empty++;
+                if (empty > 5) {
+                    break;
+                }
+            } else {
+                empty = 0;
+            }
+            if (result.storage().ToString() == std::to_string(collectedFees)) {
+                feesDB.get(1, rocksdb::Slice(std::to_string(blockHeight) + "-" + std::to_string(i)), result);
+                if (result.storage().ToString() == std::to_string(blockFee)) {
+                    feesDB.get(2, rocksdb::Slice(std::to_string(blockHeight) + "-" + std::to_string(i)), result);
+                    if (result.storage().ToString() == address) {
+                        feesDB.del(0, rocksdb::Slice(std::to_string(blockHeight)));
+                    }
+                }
+            }
+        } while (!result.storage().empty());
+        feesDB.flush();
         updateEpochFeeFile(); // update data in the file
     }
 
     void addEpochFeeEntryToFile(uint64_t blockHeight, uint64_t collectedFees, uint64_t blockFee, std::string address) {
-        long size = 0;
-        FILE *file;
-        errno_t err = fopen_s(&file, "./data/epochFees.txt", "r+");
-        if (err != 0) {
-            err = fopen_s(&file, "./data/epochFees.txt", "w+");
-            if (err != 0) {
-                CATAPULT_LOG(error) << "Error: Can't open nor create the ./data/epochFees.txt file\n";
-                return;
-            }
-        } else {
-            fseek(file, 0, SEEK_END);
-            size = ftell(file);
-            if (size == -1) {
-                CATAPULT_LOG(error) << "Error: problem with fseek in ./data/epochFees.txt file\n";
-                fclose(file);
-                return;
-            }
-        }
-        if (size % 84 > 0) {
-            CATAPULT_LOG(error) << "Fatal error: ./data/epochFees.txt file is corrupt/invalid\n";
-            return;
-        }
 
-        std::string epochFeesData[EPOCH_FEES_DATA_SIZE] = {
-            std::to_string(blockHeight),
+        const std::string feesDirectory = "./data/fees";
+        std::vector<std::string> feesFields {"default"};
+        cache::RocksDatabaseSettings feesSetting(feesDirectory, feesFields, cache::FilterPruningMode::Disabled);
+        cache::RocksDatabase feesDB(feesSetting);
+
+        int i = -1;
+        cache::RdbDataIterator result;
+        do {
+            result.storage().clear();
+            i++;
+            feesDB.get(0, rocksdb::Slice(std::to_string(blockHeight) + "-" + std::to_string(i)), result);
+        } while (!result.storage().empty());
+
+
+        std::string epochFeesData[EPOCH_FEES_DATA_SIZE - 1] = {
             std::to_string(collectedFees),
             std::to_string(blockFee),
             address
-        };
-        
-        for (int i = 0; i < EPOCH_FEES_DATA_SIZE; ++i) {
-            // add spaces to string as padding
-            /** 
-             * wowazzz: One variable `size` is used for 2 meaning?..weird
-             */
-            std::size_t epochSize = epochFeesData[i].length();
-            if (i > 0 && i < EPOCH_FEES_DATA_SIZE - 1) {
+        };        
+        for (int k = 0; k < EPOCH_FEES_DATA_SIZE - 1; ++k) {
+            std::size_t epochSize = epochFeesData[k].length();
+            if (k < EPOCH_FEES_DATA_SIZE - 2) {
                 for (std::size_t j = 0; j < 12 - epochSize; ++j) {
-                    epochFeesData[i] += ' ';
+                    epochFeesData[k] += ' ';
                 }
-            } else if (i == EPOCH_FEES_DATA_SIZE - 1) {
+            } else if (k == EPOCH_FEES_DATA_SIZE - 2) {
                 for (std::size_t j = 0; j < 50 - epochSize; ++j) {
-                    epochFeesData[i] += ' ';
-                }
-            } else {
-                for (std::size_t j = 0; j < 10 - epochSize; ++j) {
-                    epochFeesData[i] += ' ';
+                    epochFeesData[k] += ' ';
                 }
             }
-            fputs(epochFeesData[i].c_str(), file);
         }
-        fclose(file);
+        for (int k = 1; k < EPOCH_FEES_DATA_SIZE - 1; k++) {
+            epochFeesData[0] += epochFeesData[k];
+        }
+        feesDB.put(0, rocksdb::Slice(std::to_string(blockHeight) + "-" + std::to_string(i)), epochFeesData[0]);
+        feesDB.flush();
     }
 
     void updateEpochFeeFile() {
-        FILE *file;
-        errno_t err = fopen_s(&file, "./data/epochFees.txt", "w"); // erase and rewrite the data
-        if (err == 0)
-            fclose(file);
         std::deque<std::tuple<uint64_t, uint64_t, uint64_t, std::string>>::iterator it;
         for (it = epochFees.begin(); it != epochFees.end(); ++it) {
             addEpochFeeEntryToFile(std::get<0>(*it), std::get<1>(*it), std::get<2>(*it), std::get<3>(*it));
@@ -938,55 +840,36 @@ namespace catapult { namespace plugins {
         return list;
     }
 
-    void loadEpochFeeFromFile() {
-        long size;
-        bool errors = false;
-        char character;
-        std::string blockHeight = "", collectedFees = "", currentFee = "", address = "";
-        epochFees.clear();
-        FILE *file;
-        errno_t err = fopen_s(&file, "./data/epochFees.txt", "r+");
-        if (err != 0) {
-            CATAPULT_LOG(warning) << "Warning: ./data/epochFees.txt does not exist\n";
-            return;
+    void loadEpochFeeFromFile(uint64_t blockHeight) {
+        const std::string feesDirectory = "./data/fees";
+        std::vector<std::string> feesFields {"default"};
+        cache::RocksDatabaseSettings feesSetting(feesDirectory, feesFields, cache::FilterPruningMode::Disabled);
+        cache::RocksDatabase feesDB(feesSetting);
+        cache::RdbDataIterator result;
+        std::string values[EPOCH_FEES_DATA_SIZE - 1];
+        uint64_t key = blockHeight - entryLifetime + 1;
+        if (key > blockHeight) {
+            key = 0;
         }
-        fseek(file, 0, SEEK_END);
-        size = ftell(file);
-        if (size == -1) {
-            CATAPULT_LOG(error) << "Error: problem with fseek in ./data/epochFees.txt file\n";
-            fclose(file);
-            return;
-        } else if (size % 84 > 0) {
-            CATAPULT_LOG(error) << "Error: ./data/epochFees.txt content is invalid\n";
-            fclose(file);
-            return;
-        }
-        fseek(file, 0, SEEK_SET);
-        while (ftell(file) < size) {
-            blockHeight = "";
-            collectedFees = "";
-            currentFee = "";
-            address = "";
-            for (int i = 0; i < 10 && !feof(file); ++i) {
-                blockHeight += static_cast<char>(getc(file));
-            } for (int i = 0; i < 12 && !feof(file); ++i) {
-                collectedFees += static_cast<char>(getc(file));
-            } for (int i = 0; i < 12 && !feof(file); ++i) {
-                currentFee += static_cast<char>(getc(file));
-            } for (int i = 0; i < 50 && !feof(file); ++i) {
-                character = static_cast<char>(getc(file));
-                if (character != ' ') {
-                    address += character;
+        int empty = 0, i = 0;
+        while (key < blockHeight) {
+            while (empty < 5) {
+                feesDB.get(0, rocksdb::Slice(std::to_string(key) + "-" + std::to_string(i)), result);
+                i++;
+                if (result.storage().empty()) {
+                    empty++;
+                    continue;
                 }
+                empty = 0;
+                values[0] = result.storage().ToString();
+                values[1] = values[0].substr(12, 50);
+                values[0] = values[0].substr(0, 12);
+                addEpochFeeEntry(blockHeight, stoul(values[0]), stoul(values[1]), values[2]);
+                result.storage().clear();
             }
-
-            errors = !addEpochFeeEntry(std::stoul(blockHeight), std::stoul(collectedFees), std::stoul(currentFee), address, false);
-            if (errors) {
-                CATAPULT_LOG(error) << "Fatal error: ./data/epochFees.txt file is corrupt/invalid\n";
-                break;
-            }
+            i = 0;
+            key++;
         }
-        fclose(file);
     }
 
     //endregion epoch_fees_helper
