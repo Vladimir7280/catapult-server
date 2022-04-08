@@ -72,7 +72,7 @@ namespace catapult {
         double approximate(double number);
         double getCoinGenerationMultiplier(uint64_t blockHeight, bool rollback = false);
         double getMultiplier(double increase30, double increase60, double increase90);
-        uint64_t getFeeToPay(uint64_t blockHeight, uint64_t *collectedFees, bool rollback = false, std::string beneficiary = "");
+        uint64_t getFeeToPay(uint64_t blockHeight, uint64_t *collectedFees);//, bool rollback = false, std::string beneficiary = "");
         void getAverage(uint64_t blockHeight, double &average30, double &average60, double &average90, 
             double &average120);
         double getMin(double num1, double num2, double num3 = -1);

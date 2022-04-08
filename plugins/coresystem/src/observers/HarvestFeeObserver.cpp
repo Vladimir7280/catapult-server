@@ -117,9 +117,10 @@ namespace catapult { namespace observers {
 				} else {
 					CATAPULT_LOG(warning) << "Warning: epoch fees list is empty\n";
 				}
-				if (context.Height.unwrap() % catapult::plugins::feeRecalculationFrequency == 0) {
-					collectedEpochFees = 0u;
-				}
+				// done inside catapult::plugins::getFeeToPay
+				//if (context.Height.unwrap() % catapult::plugins::feeRecalculationFrequency == 0) {
+				//	collectedEpochFees = 0u;
+				//}
 				collectedEpochFees += notification.TotalFee.unwrap();
 				if (context.Height.unwrap() > 1) {
 					catapult::plugins::addEpochFeeEntry(context.Height.unwrap(), collectedEpochFees, feeToPay, model::AddressToString(notification.Beneficiary));
@@ -148,13 +149,16 @@ namespace catapult { namespace observers {
 
 			} else if (NotifyMode::Rollback == context.Mode) {
 				multiplier = catapult::plugins::getCoinGenerationMultiplier(context.Height.unwrap(), true);
-				feeToPay = catapult::plugins::getFeeToPay(context.Height.unwrap(), &collectedEpochFees, true, model::AddressToString(notification.Beneficiary));
+				feeToPay = catapult::plugins::getFeeToPay(context.Height.unwrap(), &collectedEpochFees); //, true, model::AddressToString(notification.Beneficiary));
+
+				collectedEpochFees += notification.TotalFee.unwrap(); //adding real value
+
 				if (catapult::plugins::epochFees.size() == 0) {
 					CATAPULT_LOG(error) << "Error: epoch fees list is empty, rollback mode\n";
 				}
 				CATAPULT_LOG(error) << "REMOVING EPOCH FEE ENTRY: block: " << context.Height.unwrap()
 					<< ", feeToPay: " << feeToPay << ", collected fees: " << collectedEpochFees;
-				catapult::plugins::removeEpochFeeEntry(context.Height.unwrap(), feeToPay, collectedEpochFees, model::AddressToString(notification.Beneficiary));
+				catapult::plugins::removeEpochFeeEntry(context.Height.unwrap(), feeToPay, collectedEpochFees, model::AddressToString(notification.Beneficiary)); //feeToPay, collectedEpochFees - unnecessary here
 				if (catapult::plugins::totalSupply.size() > 0) {
 					for (itTotal = catapult::plugins::totalSupply.rbegin(); itTotal != catapult::plugins::totalSupply.rend(); ++itTotal) {         
 						if (std::get<0>(*itTotal) == context.Height.unwrap()) {

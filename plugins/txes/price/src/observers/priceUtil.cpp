@@ -201,9 +201,9 @@ namespace catapult { namespace plugins {
         return 1;
     }
 
-    uint64_t getFeeToPay(uint64_t blockHeight, uint64_t *collectedFees, bool rollback, std::string beneficiary) {
+    uint64_t getFeeToPay(uint64_t blockHeight, uint64_t *collectedFees) { /*, bool rollback, std::string beneficiary) { */
         std::deque<std::tuple<uint64_t, uint64_t, uint64_t, std::string>>::reverse_iterator it;
-        if (rollback) {
+        /*if (rollback) {
             if (epochFees.size() == 0) {
                 feeToPay = 0;
                 return feeToPay;
@@ -219,10 +219,11 @@ namespace catapult { namespace plugins {
                 }
 			}
             return feeToPay;
-        }
+        } */
         if (blockHeight % feeRecalculationFrequency == 0) {
             if (epochFees.size() == 0) {
                 feeToPay = 0;
+                *collectedFees = 0u;
                 return feeToPay;
             }
             for (it = catapult::plugins::epochFees.rbegin(); it != catapult::plugins::epochFees.rend(); ++it) {
@@ -769,13 +770,13 @@ namespace catapult { namespace plugins {
                 }
             }
 
-            if (std::get<0>(*it) == blockHeight && std::get<1>(*it) == collectedFees &&
-                std::get<2>(*it) == blockFee && std::get<3>(*it) == address && multipleEntries) {
+            if (std::get<0>(*it) == blockHeight && /* std::get<1>(*it) == collectedFees && */
+                /* std::get<2>(*it) == blockFee && */ std::get<3>(*it) == address && multipleEntries) {
                 CATAPULT_LOG(info) << "Epoch fee entry removed from the list for block " << blockHeight 
                     << ", collectedFees: " << std::get<1>(*it) << ", feeToPay: " << blockFee << ", address: " << address << "\n";
                 epochFees.erase(std::next(it).base());
                 removed = true;
-                //break;
+                break;  //0 tx or 1 tx per block - works with "break"
             }
         }
         if (!removed) {
